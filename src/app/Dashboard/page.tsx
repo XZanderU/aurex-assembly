@@ -19,14 +19,22 @@ export default function DashboardPage() {
     setMensaje(null); // Limpiamos mensajes anteriores
 
     try {
-      // Inserción real en PostgreSQL usando Supabase
+      // 1. Obtenemos el usuario que tiene la sesión iniciada actualmente
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      
+      if (authError || !user) {
+        throw new Error("No se pudo verificar la sesión de seguridad. Inicia sesión nuevamente.");
+      }
+
+      // 2. Inserción real en PostgreSQL usando Supabase (Ahora con user_id)
       const { error } = await supabase
         .from("residential_complexes")
         .insert([
           { 
             name: nombre, 
             tax_id: nit, 
-            total_units: parseInt(unidades) // Aseguramos que sea un número entero
+            total_units: parseInt(unidades), // Aseguramos que sea un número entero
+            user_id: user.id // Vinculamos la copropiedad al administrador actual
           }
         ]);
 
@@ -39,6 +47,9 @@ export default function DashboardPage() {
       setNombre("");
       setNit("");
       setUnidades("");
+      
+      // Emitimos un evento personalizado para que el menú lateral se entere del nuevo conjunto y se recargue
+      window.dispatchEvent(new Event("storage"));
       
     } catch (err: any) {
       // Si hay error (ej. se cayó el internet o falló la BD), lo capturamos

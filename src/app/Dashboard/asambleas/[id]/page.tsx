@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "../../../../../lib/supabase";
+import * as XLSX from "xlsx"; // Importamos la librería para crear el Excel
 
 interface PropertyWithOwner {
   property_id: string;
@@ -23,7 +24,6 @@ export default function SalaControlPage() {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Cargar datos de la asamblea y la lista de propiedades con su estado de asistencia
   const cargarDatosSala = async () => {
     setCargando(true);
     const complexId = localStorage.getItem("complex_id");
@@ -35,46 +35,35 @@ export default function SalaControlPage() {
     }
 
     try {
-      // 1. Obtener detalles de la asamblea
       const { data: asmData, error: asmError } = await supabase
         .from("assemblies")
         .select("*")
         .eq("id", assemblyId)
         .single();
-
       if (asmError) throw asmError;
       setAsamblea(asmData);
 
-      // 2. Obtener todas las propiedades del conjunto
       const { data: propData, error: propError } = await supabase
         .from("properties")
         .select("id, tower, number, coefficient")
         .eq("complex_id", complexId);
-
       if (propError) throw propError;
 
-      // 3. Obtener los propietarios vinculados a esas propiedades
       const { data: relData, error: relError } = await supabase
         .from("property_owners")
         .select("property_id, owners(full_name, document_number)")
         .eq("is_main_contact", true);
-
       if (relError) throw relError;
 
-      // 4. Obtener los registros de asistencia actuales para esta asamblea
       const { data: attData, error: attError } = await supabase
         .from("assembly_attendees")
         .select("property_id, is_present")
         .eq("assembly_id", assemblyId);
-
       if (attError) throw attError;
 
-      // Mapear y unificar toda la información en una sola estructura manejable
       const listaUnificada: PropertyWithOwner[] = propData.map((prop: any) => {
         const relacion = relData.find((r: any) => r.property_id === prop.id);
         const asistencia = attData.find((a: any) => a.property_id === prop.id);
-        
-        // Extraer el nombre del propietario del objeto anidado de Supabase
         const propietarioInfo = relacion?.owners as unknown as { full_name: string; document_number: string } | null;
 
         return {
@@ -88,6 +77,8 @@ export default function SalaControlPage() {
         };
       });
 
+      // Ordenar alfabéticamente por número de apartamento para que el reporte salga ordenado
+      listaUnificada.sort((a, b) => a.number.localeCompare(b.number));
       setPropiedades(listaUnificada);
       setError(null);
     } catch (err: any) {
@@ -101,52 +92,55 @@ export default function SalaControlPage() {
     cargarDatosSala();
   }, [assemblyId]);
 
-  // Función para alternar el Check-in (Asistencia) de un inmueble
   const toggleAsistencia = async (propertyId: string, estadoActual: boolean) => {
     const nuevoEstado = !estadoActual;
-
-    // Optimistic UI update (actualizamos la pantalla de inmediato por velocidad)
     setPropiedades((prev) =>
       prev.map((p) => (p.property_id === propertyId ? { ...p, is_present: nuevoEstado } : p))
     );
 
     try {
       if (nuevoEstado) {
-        // Si marca asistencia, insertamos el registro
-        await supabase.from("assembly_attendees").insert([
-          {
-            assembly_id: assemblyId,
-            property_id: propertyId,
-            is_present: true,
-          },
-        ]);
+        await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propertyId, is_present: true }]);
       } else {
-        // Si desmarca, borramos el registro de asistencia
-        await supabase
-          .from("assembly_attendees")
-          .delete()
-          .eq("assembly_id", assemblyId)
-          .eq("property_id", propertyId);
+        await supabase.from("assembly_attendees").delete().eq("assembly_id", assemblyId).eq("property_id", propertyId);
       }
     } catch (err) {
       console.error("Error al actualizar asistencia:", err);
-      // Revertir en caso de fallo en BD recargando los datos
       cargarDatosSala();
     }
   };
 
-  // Cálculo en tiempo real del Quórum (Suma de coeficientes de los presentes)
-  const quorumActual = propiedades
-    .filter((p) => p.is_present)
-    .reduce((acc, curr) => acc + curr.coefficient, 0);
+  const quorumActual = propiedades.filter((p) => p.is_present).reduce((acc, curr) => acc + curr.coefficient, 0);
 
-  if (cargando) {
-    return <div className="p-8 text-blue-600 font-medium animate-pulse">Cargando Sala de Control y Padrón...</div>;
-  }
+  // NUEVA FUNCIÓN: Generador de Reporte Excel
+  const exportarAExcel = () => {
+    // 1. Preparamos los datos con nombres de columnas amigables
+    const datosExportar = propiedades.map(p => ({
+      "Inmueble": p.tower ? `Torre ${p.tower} - Apto ${p.number}` : `Apto ${p.number}`,
+      "Propietario": p.owner_name,
+      "Documento": p.document_number,
+      "Coeficiente (%)": p.coefficient,
+      "Estado de Asistencia": p.is_present ? "PRESENTE" : "AUSENTE"
+    }));
 
-  if (error || !asamblea) {
-    return <div className="p-8 text-red-600 font-medium">{error || "Asamblea no encontrada."}</div>;
-  }
+    // 2. Agregamos una fila al final con el resumen del Quórum
+    datosExportar.push({
+      "Inmueble": "TOTAL QUÓRUM REGISTRADO",
+      "Propietario": "",
+      "Documento": "",
+      "Coeficiente (%)": quorumActual,
+      "Estado de Asistencia": ""
+    });
+
+    // 3. Creamos el libro de Excel y lo descargamos
+    const hoja = XLSX.utils.json_to_sheet(datosExportar);
+    const libro = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(libro, hoja, "Asistencia");
+    XLSX.writeFile(libro, `Reporte_Asistencia_${asamblea?.type}_${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
+  if (cargando) return <div className="p-8 text-blue-600 font-medium animate-pulse">Cargando Sala de Control...</div>;
+  if (error || !asamblea) return <div className="p-8 text-red-600 font-medium">{error || "Asamblea no encontrada."}</div>;
 
   return (
     <div className="p-8">
@@ -167,17 +161,28 @@ export default function SalaControlPage() {
             <p className="text-xs text-gray-400 font-mono mt-1">Sesión Activa</p>
           </div>
           
-          {/* Indicador Visual de Quórum */}
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center min-w-[200px]">
-            <p className="text-xs text-blue-600 font-bold uppercase tracking-wider mb-1">Quórum Registrado</p>
-            <p className={`text-3xl font-extrabold ${quorumActual >= 50 ? 'text-green-600' : 'text-blue-900'}`}>
-              {quorumActual.toFixed(2)}%
-            </p>
-            <div className="w-full bg-blue-200 h-2 rounded-full mt-2 overflow-hidden">
-              <div 
-                className={`h-full transition-all duration-300 ${quorumActual >= 50 ? 'bg-green-500' : 'bg-blue-600'}`}
-                style={{ width: `${Math.min(quorumActual, 100)}%` }}
-              ></div>
+          <div className="flex gap-4 items-center">
+            {/* NUEVO BOTÓN DE EXPORTACIÓN */}
+            <button 
+              onClick={exportarAExcel}
+              className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white text-sm font-bold py-2.5 px-4 rounded-lg transition-colors shadow-sm"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+              Exportar Excel
+            </button>
+
+            {/* Indicador Visual de Quórum */}
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center min-w-[200px]">
+              <p className="text-xs text-blue-600 font-bold uppercase tracking-wider mb-1">Quórum Registrado</p>
+              <p className={`text-3xl font-extrabold ${quorumActual >= 50 ? 'text-green-600' : 'text-blue-900'}`}>
+                {quorumActual.toFixed(2)}%
+              </p>
+              <div className="w-full bg-blue-200 h-2 rounded-full mt-2 overflow-hidden">
+                <div 
+                  className={`h-full transition-all duration-300 ${quorumActual >= 50 ? 'bg-green-500' : 'bg-blue-600'}`}
+                  style={{ width: `${Math.min(quorumActual, 100)}%` }}
+                ></div>
+              </div>
             </div>
           </div>
         </div>
@@ -185,7 +190,7 @@ export default function SalaControlPage() {
         {/* Tabla de Check-in de Propietarios */}
         <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
           <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-            <h3 className="text-lg font-bold text-blue-950">Padrón de Copropietarios e Inmuebles</h3>
+            <h3 className="text-lg font-bold text-blue-950">Padrón de Copropietarios</h3>
             <span className="text-sm text-gray-500 font-medium">
               Total Presentes: <strong className="text-blue-900">{propiedades.filter(p => p.is_present).length}</strong> / {propiedades.length}
             </span>
@@ -219,18 +224,11 @@ export default function SalaControlPage() {
                             ? 'bg-green-600 hover:bg-green-700 text-white' 
                             : 'bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300'}`}
                       >
-                        {p.is_present ? '✓ Presente (Check-in)' : 'Registrar Ingreso'}
+                        {p.is_present ? '✓ Presente' : 'Registrar Ingreso'}
                       </button>
                     </td>
                   </tr>
                 ))}
-                {propiedades.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="px-6 py-12 text-center text-gray-400">
-                      No hay propiedades registradas en este conjunto. Importa un archivo Excel primero.
-                    </td>
-                  </tr>
-                )}
               </tbody>
             </table>
           </div>
