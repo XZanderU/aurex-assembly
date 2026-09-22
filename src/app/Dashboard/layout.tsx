@@ -37,6 +37,13 @@ export default function DashboardLayout({
           >
             📊 Importar Propietarios
           </Link>
+
+          <Link 
+          href="/dashboard/mis-asambleas"
+          className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-blue-800 transition-colors text-sm font-medium text-blue-100 hover:text-white"
+          >
+            📋 Mis Asambleas
+            </Link>
           
           <Link 
             href="/dashboard/asambleas" 
