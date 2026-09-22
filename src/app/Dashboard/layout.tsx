@@ -39,10 +39,9 @@ export default function DashboardLayout({
           </Link>
           
           <Link 
-            href="/dashboard" 
-            className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-blue-800 transition-colors text-sm font-medium text-blue-100 hover:text-white opacity-50 cursor-not-allowed title='En desarrollo'"
-          >
-            🤝 Mis Asambleas
+            href="/dashboard/asambleas" 
+            className="flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-blue-800 transition-colors text-sm font-medium text-blue-100 hover:text-white">
+            🤝 Crear Asamblea
           </Link>
         </nav>
 
