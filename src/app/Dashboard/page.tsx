@@ -22,7 +22,7 @@ export default function DashboardPage() {
 
   return (
     // Contenedor principal con fondo azul, preparado para alojar una imagen de fondo después
-    <div className="min-h-screen bg-blue-900 p-8 flex items-center justify-center">
+    <div className="min-h-screen p-8 flex items-center justify-center">
       
       <div className="w-full max-w-xl bg-white rounded-xl shadow-2xl p-8 border border-blue-100">
         <div className="mb-6">
