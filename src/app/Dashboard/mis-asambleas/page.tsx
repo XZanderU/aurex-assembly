@@ -131,9 +131,11 @@ export default function MisAsambleasPage() {
                 </div>
 
                 <div className="border-t border-blue-50 p-4 bg-blue-50/30">
-                  <button className="w-full bg-blue-100 hover:bg-blue-600 hover:text-white text-blue-800 font-bold py-2.5 px-4 rounded-lg transition-colors text-sm">
+                  <Link
+                  href={`/dashboard/asambleas/${asamblea.id}`} 
+                  className="w-full bg-blue-100 hover:bg-blue-600 hover:text-white text-blue-800 font-bold py-2.5 px-4 rounded-lg transition-colors text-sm">
                     Ingresar a Sala de Control
-                  </button>
+                  </Link>
                 </div>
 
               </div>
