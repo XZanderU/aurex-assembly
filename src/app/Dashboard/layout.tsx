@@ -1,7 +1,7 @@
 import Link from "next/link";
 import React from "react";
 import SelectorConjunto from "./SelectorConjunto"; //componente cliente
-
+import { LogoAurex } from "../components/LogoAurex";
 export default function DashboardLayout({
   children,
 }: {
@@ -57,7 +57,7 @@ export default function DashboardLayout({
         <div className="p-4 border-t border-blue-900 bg-blue-950">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-blue-800 flex items-center justify-center font-bold">
-              AD
+             <LogoAurex className="w-10 h-10"/>
             </div>
             <div>
               <p className="text-sm font-bold">Administrador</p>

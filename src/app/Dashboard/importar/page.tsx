@@ -3,6 +3,7 @@
 import { useState } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "../../../../lib/supabase";
+import { LogoAurex } from "@/app/components/LogoAurex";
 
 interface PropietarioExcel {
   TORRE?: string;
@@ -125,6 +126,7 @@ export default function ImportarExcelPage() {
       <div className="max-w-5xl mx-auto space-y-6">
         
         {/* Tarjeta de Carga */}
+        <LogoAurex className="w-10 h-10"/>
         <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100">
           <h1 className="text-2xl font-bold text-blue-950 mb-2">Importar Propietarios</h1>
           
