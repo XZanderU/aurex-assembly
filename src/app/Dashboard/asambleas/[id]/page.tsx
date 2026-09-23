@@ -71,7 +71,7 @@ export default function SalaControlPage() {
       if (qError) throw qError;
       setPreguntas(qData || []);
 
-      const listaUnificada: PropertyWithOwner[] = propData.map((prop: any) => {
+        const listaUnificada: PropertyWithOwner[] = propData.map((prop: any) => {
         const relacion = relData.find((r: any) => r.property_id === prop.id);
         const asistencia = attData.find((a: any) => a.property_id === prop.id);
         const propietarioInfo = relacion?.owners as unknown as { full_name: string; document_number: string } | null;
@@ -262,33 +262,74 @@ export default function SalaControlPage() {
             </table>
           </div>
         )}
+{/* PESTAÑA 2: VOTACIONES */}
+{activeTab === 'VOTACION' && (
+  <div className="space-y-6">
+    
+    {/* Panel de Creación de Pregunta */}
+    <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100">
+      <h3 className="text-lg font-bold text-blue-950 mb-4">Lanzar Nueva Votación</h3>
+      <form onSubmit={crearPregunta} className="flex gap-4 items-end">
+        <div className="flex-1">
+          <label className="text-sm font-semibold text-gray-700 mb-1 block">Pregunta o Tema a decidir</label>
+          <input 
+            type="text" 
+            required 
+            value={nuevaPregunta} 
+            onChange={e => setNuevaPregunta(e.target.value)} 
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 outline-none" 
+            placeholder="Ej. ¿Aprueba la gestión y el presupuesto?" 
+          />
+        </div>
+        <button 
+          type="submit" 
+          disabled={creandoPregunta || quorumActual === 0}
+          className={`py-3 px-6 rounded-lg font-bold text-white shadow-sm transition-colors ${quorumActual === 0 ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+        >
+          {creandoPregunta ? 'Creando...' : 'Abrir Votación'}
+        </button>
+      </form>
+    </div>
 
-        {/* PESTAÑA 2: VOTACIONES */}
-        {activeTab === 'VOTACION' && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100">
-              <h3 className="text-lg font-bold text-blue-950 mb-4">Lanzar Nueva Votación</h3>
-              <form onSubmit={crearPregunta} className="flex gap-4 items-end">
-                <div className="flex-1">
-                  <input type="text" required value={nuevaPregunta} onChange={e => setNuevaPregunta(e.target.value)} className="w-full p-3 border rounded-lg outline-none focus:ring-2 focus:ring-blue-600" placeholder="Ej. ¿Aprueba el presupuesto 2026?" />
-                </div>
-                <button type="submit" disabled={creandoPregunta || quorumActual === 0} className="py-3 px-6 rounded-lg font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400">Abrir Votación</button>
-              </form>
-            </div>
-
-            <div className="space-y-4">
-              {preguntas.map((pregunta) => (
-                <div key={pregunta.id} className="bg-white rounded-xl shadow-sm p-6 border border-blue-100 flex justify-between items-center">
-                  <div>
-                    <h4 className="text-lg font-bold text-blue-900">{pregunta.title}</h4>
-                    <p className="text-xs font-bold text-green-600 mt-1">EN CURSO</p>
-                  </div>
-                  <button onClick={() => abrirPanelVotacion(pregunta)} className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700">Administrar Votos</button>
-                </div>
-              ))}
-            </div>
+    {/* Listado de Preguntas con Control de Estado */}
+    <div className="space-y-4">
+      {preguntas.map((pregunta) => (
+        <div key={pregunta.id} className="bg-white rounded-xl shadow-sm p-6 border border-blue-100 flex flex-col md:flex-row justify-between items-center gap-4">
+          <div>
+            <h4 className="text-lg font-bold text-blue-900">{pregunta.title}</h4>
+            <p className="text-xs font-bold mt-1">
+              Estado: <span className={pregunta.status === 'OPEN' ? 'text-green-600' : 'text-red-600'}>
+                {pregunta.status === 'OPEN' ? '🟢 ABIERTA (Recibiendo decisiones)' : '🔴 CERRADA (Resultados Congelados)'}
+              </span>
+            </p>
           </div>
-        )}
+          <div className="flex gap-3">
+            <button 
+              onClick={() => abrirPanelVotacion(pregunta)} 
+              className="bg-blue-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-blue-700 transition-colors shadow-sm text-sm"
+            >
+              {pregunta.status === 'OPEN' ? 'Administrar / Ver Votos' : 'Ver Resultados Finales'}
+            </button>
+            
+            {pregunta.status === 'OPEN' && (
+              <button 
+                onClick={async () => {
+                  if (!confirm("¿Estás seguro de cerrar esta votación? Los datos quedarán bloqueados.")) return;
+                  await supabase.from("assembly_questions").update({ status: 'CLOSED' }).eq("id", pregunta.id);
+                  cargarDatosSala();
+                }}
+                className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold py-2 px-4 rounded-lg transition-colors text-sm"
+              >
+                Cerrar Votación
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+    
+  </div>
+)}
 
       </div>
 
