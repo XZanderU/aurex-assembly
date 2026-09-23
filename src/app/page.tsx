@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
+import { LogoAurex } from "./components/LogoAurex";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -42,8 +43,8 @@ export default function LoginPage() {
       
       <div className="relative z-10 w-full max-w-md bg-white p-10 rounded-2xl shadow-2xl border border-blue-100">
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-blue-600 text-white rounded-full flex items-center justify-center text-2xl font-bold mx-auto mb-4 shadow-lg">
-            A
+          <div className="w-16 h-16 text-white rounded-full flex items-center justify-center text-2xl font-bold mx-auto mb-4 shadow-lg">
+            <LogoAurex className="w-10 h-10"/>
           </div>
           <h1 className="text-3xl font-bold text-blue-950 mb-2">Aurex Assembly</h1>
           <p className="text-sm text-gray-500">Ingresa tus credenciales para administrar tu copropiedad</p>
