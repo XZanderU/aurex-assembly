@@ -19,15 +19,15 @@ export default function PortalVotacionPropietario() {
 
   const [miPropiedad, setMiPropiedad] = useState<any>(null);
 
+  // NUEVOS ESTADOS PARA VOTACIÓN
+  const [preguntaActiva, setPreguntaActiva] = useState<any>(null);
+  const [miVoto, setMiVoto] = useState<string | null>(null);
+  const [enviandoVoto, setEnviandoVoto] = useState(false);
+
   useEffect(() => {
     const cargarAsamblea = async () => {
       try {
-        const { data, error } = await supabase
-          .from("assemblies")
-          .select("*, residential_complexes(name)")
-          .eq("id", assemblyId)
-          .single();
-
+        const { data, error } = await supabase.from("assemblies").select("*, residential_complexes(name)").eq("id", assemblyId).single();
         if (error) throw error;
         setAsamblea(data);
       } catch (err: any) {
@@ -39,56 +39,93 @@ export default function PortalVotacionPropietario() {
     cargarAsamblea();
   }, [assemblyId]);
 
+  // MOTOR DE TIEMPO REAL: Se activa únicamente después de ingresar (cuando existe miPropiedad)
+  useEffect(() => {
+    if (!miPropiedad) return;
+
+    // 1. Función para buscar si hay una pregunta activa al momento de entrar
+    const fetchPreguntaActual = async () => {
+      const { data: qData } = await supabase.from("assembly_questions").select("*").eq("assembly_id", assemblyId).eq("status", "OPEN").single();
+      
+      if (qData) {
+        setPreguntaActiva(qData);
+        // Revisar si yo ya había votado en esta pregunta
+        const { data: vData } = await supabase.from("assembly_votes").select("*").eq("question_id", qData.id).eq("property_id", miPropiedad.property_id).single();
+        if (vData) setMiVoto(vData.vote_option);
+      } else {
+        setPreguntaActiva(null);
+        setMiVoto(null);
+      }
+    };
+
+    fetchPreguntaActual();
+
+    // 2. Suscripción a WebSockets para reaccionar al instante a los clics del Administrador
+    const canalPreguntas = supabase.channel('preguntas-en-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'assembly_questions', filter: `assembly_id=eq.${assemblyId}` }, (payload) => {
+        
+        // Casteamos payload.new a 'any' para evitar el error de TypeScript
+        const nuevoRegistro = payload.new as any;
+
+        // Verificamos de forma segura
+        if (nuevoRegistro && nuevoRegistro.status === 'OPEN') {
+          setPreguntaActiva(nuevoRegistro);
+          setMiVoto(null); // Reseteamos el voto para la nueva pregunta
+        } else {
+          setPreguntaActiva(null); // Si se cierra, volvemos a la sala de espera
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(canalPreguntas);
+    };
+  }, [miPropiedad, assemblyId]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIngresando(true);
     setMensajeError("");
-
     try {
-      // 1. Buscamos TODOS los asistentes de esta asamblea sin el filtro de PIN para evitar el bloqueo del RLS
-      const { data, error } = await supabase
-        .from("assembly_attendees")
-        .select(`
-          property_id,
-          access_pin,
-          properties (number, tower, coefficient)
-        `)
-        .eq("assembly_id", assemblyId);
-
+      const { data, error } = await supabase.from("assembly_attendees").select(`property_id, access_pin, properties (number, tower, coefficient)`).eq("assembly_id", assemblyId);
       if (error) throw error;
+      if (!data || data.length === 0) throw new Error("No hay registros en esta asamblea.");
 
-      if (!data || data.length === 0) {
-        throw new Error("No hay ningún copropietario registrado con asistencia en esta asamblea.");
-      }
-
-      // 2. Buscamos la coincidencia manualmente en JavaScript
       const asistente = data.find((item: any) => {
         const prop = Array.isArray(item.properties) ? item.properties[0] : item.properties;
-        const numAptoMatch = prop?.number?.toString().trim() === apto.trim();
-        const pinMatch = item.access_pin?.toString().trim() === pin.trim();
-        
-        return numAptoMatch && pinMatch;
+        return prop?.number?.toString().trim() === apto.trim() && item.access_pin?.toString().trim() === pin.trim();
       });
 
-      if (!asistente) {
-        throw new Error(`El Apto "${apto}" o el PIN "${pin}" son incorrectos.`);
-      }
+      if (!asistente) throw new Error(`El Apto "${apto}" o el PIN "${pin}" son incorrectos.`);
 
-      const propFinal = Array.isArray(asistente.properties) 
-        ? asistente.properties[0] 
-        : asistente.properties;
-
-      setMiPropiedad({
-        property_id: asistente.property_id,
-        number: propFinal.number,
-        tower: propFinal.tower,
-        coefficient: propFinal.coefficient
-      });
-
+      const propFinal = Array.isArray(asistente.properties) ? asistente.properties[0] : asistente.properties;
+      setMiPropiedad({ property_id: asistente.property_id, number: propFinal.number, tower: propFinal.tower, coefficient: propFinal.coefficient });
     } catch (err: any) {
       setMensajeError(err.message || "Error al validar credenciales.");
     } finally {
       setIngresando(false);
+    }
+  };
+
+  // NUEVA FUNCIÓN: Enviar el voto a la base de datos
+  const registrarVoto = async (opcion: 'FAVOR' | 'CONTRA' | 'BLANCO') => {
+    if (!preguntaActiva || miVoto) return;
+    setEnviandoVoto(true);
+
+    try {
+      const { error } = await supabase.from("assembly_votes").insert([{
+        question_id: preguntaActiva.id,
+        property_id: miPropiedad.property_id,
+        vote_option: opcion,
+        coefficient: miPropiedad.coefficient
+      }]);
+
+      if (error) throw error;
+      setMiVoto(opcion); // Actualizamos la UI inmediatamente
+    } catch (err) {
+      alert("Hubo un error al registrar el voto. Intenta de nuevo.");
+    } finally {
+      setEnviandoVoto(false);
     }
   };
 
@@ -103,22 +140,13 @@ export default function PortalVotacionPropietario() {
             <h1 className="text-2xl font-bold text-white">Aurex Votaciones</h1>
             <p className="text-blue-200 text-sm mt-1">{asamblea?.residential_complexes?.name}</p>
           </div>
-          
           <div className="p-8">
             <div className="text-center mb-6">
-              <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full uppercase">
-                {asamblea?.type}
-              </span>
+              <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full uppercase">{asamblea?.type}</span>
               <h2 className="text-gray-800 font-bold mt-3">Ingreso de Copropietarios</h2>
               <p className="text-xs text-gray-500 mt-1">Ingresa tu número de apartamento y el PIN de 4 dígitos que te entregaron en el registro.</p>
             </div>
-
-            {mensajeError && (
-              <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm font-bold mb-4 text-center border border-red-200">
-                {mensajeError}
-              </div>
-            )}
-
+            {mensajeError && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm font-bold mb-4 text-center border border-red-200">{mensajeError}</div>}
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
                 <label className="text-sm font-bold text-gray-700">Número de Apartamento</label>
@@ -128,7 +156,6 @@ export default function PortalVotacionPropietario() {
                 <label className="text-sm font-bold text-gray-700">PIN de Acceso</label>
                 <input type="text" required maxLength={4} value={pin} onChange={e => setPin(e.target.value)} placeholder="****" className="w-full mt-1 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 outline-none text-center font-bold text-2xl tracking-[0.5em]" />
               </div>
-              
               <button type="submit" disabled={ingresando || pin.length < 4 || !apto} className="w-full py-4 mt-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-colors disabled:bg-gray-400 shadow-md">
                 {ingresando ? 'Validando...' : 'Entrar a la Asamblea'}
               </button>
@@ -139,6 +166,7 @@ export default function PortalVotacionPropietario() {
     );
   }
 
+  // VISTA DE LA SALA: Depende de si hay una pregunta abierta o no
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <div className="bg-blue-950 p-4 text-white shadow-md flex justify-between items-center">
@@ -154,13 +182,73 @@ export default function PortalVotacionPropietario() {
         </div>
       </div>
 
-      <div className="flex-1 p-6 flex flex-col items-center justify-center">
-        <div className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200 text-center max-w-md w-full">
-          <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-10 h-10 text-blue-500 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-          </div>
-          <h3 className="text-xl font-bold text-blue-900 mb-2">Esperando Votación...</h3>
-          <p className="text-gray-500 text-sm">Estás conectado correctamente. Cuando el administrador abra una pregunta, las opciones de voto aparecerán aquí automáticamente.</p>
+      <div className="flex-1 p-4 md:p-6 flex flex-col items-center justify-center">
+        <div className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-200 text-center max-w-lg w-full">
+          
+          {/* ESTADO 1: NO HAY PREGUNTA ACTIVA (Sala de Espera) */}
+          {!preguntaActiva && (
+            <>
+              <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-10 h-10 text-blue-500 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              </div>
+              <h3 className="text-xl font-bold text-blue-900 mb-2">Esperando Votación...</h3>
+              <p className="text-gray-500 text-sm">Mantén esta pantalla abierta. Las opciones de voto aparecerán automáticamente cuando el administrador inicie una votación.</p>
+            </>
+          )}
+
+          {/* ESTADO 2: HAY PREGUNTA ACTIVA PERO YA VOTÓ */}
+          {preguntaActiva && miVoto && (
+            <>
+              <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-10 h-10 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+              </div>
+              <h3 className="text-xl font-bold text-gray-800 mb-2">¡Voto Registrado!</h3>
+              <p className="text-gray-500 text-sm mb-4">Tu decisión para la pregunta actual ha sido guardada de forma segura.</p>
+              <div className="bg-gray-50 border border-gray-200 p-4 rounded-xl">
+                <p className="text-xs text-gray-500 uppercase font-bold mb-1">Votaste:</p>
+                <p className={`font-bold text-lg ${miVoto === 'FAVOR' ? 'text-green-600' : miVoto === 'CONTRA' ? 'text-red-600' : 'text-gray-600'}`}>
+                  {miVoto === 'FAVOR' ? 'A FAVOR' : miVoto === 'CONTRA' ? 'EN CONTRA' : 'EN BLANCO'}
+                </p>
+              </div>
+            </>
+          )}
+
+          {/* ESTADO 3: HAY PREGUNTA ACTIVA Y NO HA VOTADO */}
+          {preguntaActiva && !miVoto && (
+            <>
+              <div className="mb-6">
+                <span className="bg-blue-100 text-blue-800 text-xs font-bold px-3 py-1 rounded-full uppercase animate-pulse">Votación en Curso</span>
+              </div>
+              <h3 className="text-2xl font-bold text-blue-950 mb-8 leading-tight">{preguntaActiva.title}</h3>
+              
+              <div className="space-y-3">
+                <button 
+                  disabled={enviandoVoto}
+                  onClick={() => registrarVoto('FAVOR')}
+                  className="w-full py-4 px-6 bg-white border-2 border-green-500 text-green-700 font-bold text-lg rounded-xl hover:bg-green-50 active:bg-green-100 transition-colors shadow-sm disabled:opacity-50 flex justify-between items-center"
+                >
+                  <span>A FAVOR</span>
+                  <span className="text-2xl">👍</span>
+                </button>
+                <button 
+                  disabled={enviandoVoto}
+                  onClick={() => registrarVoto('CONTRA')}
+                  className="w-full py-4 px-6 bg-white border-2 border-red-500 text-red-700 font-bold text-lg rounded-xl hover:bg-red-50 active:bg-red-100 transition-colors shadow-sm disabled:opacity-50 flex justify-between items-center"
+                >
+                  <span>EN CONTRA</span>
+                  <span className="text-2xl">👎</span>
+                </button>
+                <button 
+                  disabled={enviandoVoto}
+                  onClick={() => registrarVoto('BLANCO')}
+                  className="w-full py-4 px-6 bg-white border-2 border-gray-300 text-gray-600 font-bold text-lg rounded-xl hover:bg-gray-50 active:bg-gray-100 transition-colors shadow-sm disabled:opacity-50 flex justify-between items-center"
+                >
+                  <span>VOTO EN BLANCO</span>
+                  <span className="text-2xl">⚪</span>
+                </button>
+              </div>
+            </>
+          )}
           
           <div className="mt-8 pt-6 border-t border-gray-100 flex justify-between text-xs text-gray-400 font-bold uppercase">
             <span>Tu Coeficiente:</span>
