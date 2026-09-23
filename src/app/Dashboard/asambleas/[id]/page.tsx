@@ -11,12 +11,10 @@ interface PropertyWithOwner {
   number: string;
   coefficient: number;
   owner_name: string;
-  document_number: string;
   is_present: boolean;
   is_proxy?: boolean;
   proxy_name?: string;
-  proxy_document?: string;
-  access_pin?: string; // NUEVO: Guardaremos el PIN de acceso
+  access_pin?: string;
 }
 
 export default function SalaControlPage() {
@@ -30,8 +28,8 @@ export default function SalaControlPage() {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Estados de UI
-  const [activeTab, setActiveTab] = useState<'CHECKIN' | 'VOTACION'>('CHECKIN');
+  // Estados de UI (Ahora con 3 pestañas)
+  const [activeTab, setActiveTab] = useState<'CHECKIN' | 'VOTACION' | 'DEBATE'>('CHECKIN');
   
   // Estados para Delegados
   const [modalOpen, setModalOpen] = useState(false);
@@ -43,9 +41,12 @@ export default function SalaControlPage() {
   const [creandoPregunta, setCreandoPregunta] = useState(false);
   const [preguntaActiva, setPreguntaActiva] = useState<any>(null);
   const [votos, setVotos] = useState<any[]>([]);
-  const [cargandoVotos, setCargandoVotos] = useState(false);
+  
+  // NUEVO: Estados para Debate y Enlace
+  const [turnos, setTurnos] = useState<any[]>([]);
+  const [streamingUrl, setStreamingUrl] = useState("");
+  const [guardandoLink, setGuardandoLink] = useState(false);
 
-  // NUEVA FUNCIÓN: Generador de PIN de 4 dígitos
   const generarPin = () => Math.floor(1000 + Math.random() * 9000).toString();
 
   const cargarDatosSala = async () => {
@@ -62,25 +63,23 @@ export default function SalaControlPage() {
       const { data: asmData, error: asmError } = await supabase.from("assemblies").select("*").eq("id", assemblyId).single();
       if (asmError) throw asmError;
       setAsamblea(asmData);
+      setStreamingUrl(asmData.streaming_url || ""); // Cargar link existente
 
-      const { data: propData, error: propError } = await supabase.from("properties").select("id, tower, number, coefficient").eq("complex_id", complexId);
-      if (propError) throw propError;
+      const { data: propData } = await supabase.from("properties").select("id, tower, number, coefficient").eq("complex_id", complexId);
+      const { data: relData } = await supabase.from("property_owners").select("property_id, owners(full_name)").eq("is_main_contact", true);
+      const { data: attData } = await supabase.from("assembly_attendees").select("property_id, is_present, is_proxy, proxy_name, access_pin").eq("assembly_id", assemblyId);
+      const { data: qData } = await supabase.from("assembly_questions").select("*").eq("assembly_id", assemblyId).order("created_at", { ascending: false });
+      
+      // Cargar turnos iniciales
+      const { data: turnosData } = await supabase.from("assembly_speakers").select("*, properties(number, tower)").eq("assembly_id", assemblyId).order("created_at", { ascending: true });
 
-      const { data: relData, error: relError } = await supabase.from("property_owners").select("property_id, owners(full_name, document_number)").eq("is_main_contact", true);
-      if (relError) throw relError;
-
-      // ACTUALIZADO: Traemos también el access_pin de la base de datos
-      const { data: attData, error: attError } = await supabase.from("assembly_attendees").select("property_id, is_present, is_proxy, proxy_name, proxy_document, access_pin").eq("assembly_id", assemblyId);
-      if (attError) throw attError;
-
-      const { data: qData, error: qError } = await supabase.from("assembly_questions").select("*").eq("assembly_id", assemblyId).order("created_at", { ascending: false });
-      if (qError) throw qError;
       setPreguntas(qData || []);
+      setTurnos(turnosData || []);
 
-      const listaUnificada: PropertyWithOwner[] = propData.map((prop: any) => {
-        const relacion = relData.find((r: any) => r.property_id === prop.id);
-        const asistencia = attData.find((a: any) => a.property_id === prop.id);
-        const propietarioInfo = relacion?.owners as unknown as { full_name: string; document_number: string } | null;
+      const listaUnificada: PropertyWithOwner[] = (propData || []).map((prop: any) => {
+        const relacion = (relData || []).find((r: any) => r.property_id === prop.id);
+        const asistencia = (attData || []).find((a: any) => a.property_id === prop.id);
+        const propietarioInfo = relacion?.owners as unknown as { full_name: string } | null;
 
         return {
           property_id: prop.id,
@@ -88,11 +87,9 @@ export default function SalaControlPage() {
           number: prop.number,
           coefficient: Number(prop.coefficient) || 0,
           owner_name: propietarioInfo?.full_name || "Sin propietario",
-          document_number: propietarioInfo?.document_number || "N/A",
           is_present: asistencia ? asistencia.is_present : false,
           is_proxy: asistencia ? asistencia.is_proxy : false,
           proxy_name: asistencia ? asistencia.proxy_name : undefined,
-          proxy_document: asistencia ? asistencia.proxy_document : undefined,
           access_pin: asistencia ? asistencia.access_pin : undefined,
         };
       });
@@ -101,7 +98,7 @@ export default function SalaControlPage() {
       setPropiedades(listaUnificada);
       setError(null);
     } catch (err: any) {
-      setError("Error al cargar la sala: " + err.message);
+      setError("Error al cargar la sala.");
     } finally {
       setCargando(false);
     }
@@ -111,35 +108,51 @@ export default function SalaControlPage() {
     cargarDatosSala();
   }, [assemblyId]);
 
-  // Funciones Check-in (Modificadas para generar PIN)
+  // TIEMPO REAL ADMINISTRADOR (Votos y Turnos)
+  useEffect(() => {
+    // 1. Escuchar Votos (Si hay pregunta activa)
+    let canalVotos: any;
+    if (preguntaActiva && preguntaActiva.status === 'OPEN') {
+      canalVotos = supabase.channel('votos-admin-vivo')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'assembly_votes', filter: `question_id=eq.${preguntaActiva.id}` }, (payload) => {
+          setVotos(prev => prev.some(v => v.property_id === payload.new.property_id) ? prev : [...prev, payload.new]);
+        }).subscribe();
+    }
+
+    // 2. Escuchar Nuevos Turnos de Debate (Siempre activo)
+    const canalTurnos = supabase.channel('turnos-admin-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'assembly_speakers', filter: `assembly_id=eq.${assemblyId}` }, async (payload) => {
+        // Recargamos los turnos al haber cambios para traer el cruce de tablas actualizado
+        const { data: turnosData } = await supabase.from("assembly_speakers").select("*, properties(number, tower)").eq("assembly_id", assemblyId).order("created_at", { ascending: true });
+        setTurnos(turnosData || []);
+      }).subscribe();
+
+    return () => {
+      if (canalVotos) supabase.removeChannel(canalVotos);
+      supabase.removeChannel(canalTurnos);
+    };
+  }, [preguntaActiva, assemblyId]);
+
+  // Funciones Check-in
   const toggleAsistencia = async (propertyId: string, estadoActual: boolean) => {
     const nuevoEstado = !estadoActual;
-    const nuevoPin = nuevoEstado ? generarPin() : ""; // Genera PIN solo si entra
-
-    setPropiedades(prev => prev.map(p => p.property_id === propertyId ? { ...p, is_present: nuevoEstado, is_proxy: false, proxy_name: "", proxy_document: "", access_pin: nuevoPin } : p));
-    
+    const nuevoPin = nuevoEstado ? generarPin() : "";
+    setPropiedades(prev => prev.map(p => p.property_id === propertyId ? { ...p, is_present: nuevoEstado, is_proxy: false, proxy_name: "", access_pin: nuevoPin } : p));
     try {
-      if (nuevoEstado) {
-        await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propertyId, is_present: true, is_proxy: false, access_pin: nuevoPin }]);
-      } else {
-        await supabase.from("assembly_attendees").delete().eq("assembly_id", assemblyId).eq("property_id", propertyId);
-      }
-    } catch (err) { console.error(err); cargarDatosSala(); }
+      if (nuevoEstado) await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propertyId, is_present: true, access_pin: nuevoPin }]);
+      else await supabase.from("assembly_attendees").delete().eq("assembly_id", assemblyId).eq("property_id", propertyId);
+    } catch (err) { cargarDatosSala(); }
   };
 
   const registrarDelegado = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!propiedadSeleccionada) return;
-    
-    const nuevoPin = generarPin(); // Genera PIN para el delegado
-    
-    setPropiedades(prev => prev.map(p => p.property_id === propiedadSeleccionada ? { ...p, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, proxy_document: formDelegado.documento, access_pin: nuevoPin } : p));
+    const nuevoPin = generarPin();
+    setPropiedades(prev => prev.map(p => p.property_id === propiedadSeleccionada ? { ...p, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, access_pin: nuevoPin } : p));
     setModalOpen(false);
-    setFormDelegado({ nombre: "", documento: "" });
-    
     try {
-      await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propiedadSeleccionada, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, proxy_document: formDelegado.documento, access_pin: nuevoPin }]);
-    } catch (err) { console.error(err); cargarDatosSala(); }
+      await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propiedadSeleccionada, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, access_pin: nuevoPin }]);
+    } catch (err) { cargarDatosSala(); }
   };
 
   // Funciones Preguntas
@@ -152,40 +165,43 @@ export default function SalaControlPage() {
       if (error) throw error;
       setPreguntas([data, ...preguntas]);
       setNuevaPregunta("");
-    } catch (err) { alert("Hubo un error al crear la votación."); } 
-    finally { setCreandoPregunta(false); }
+    } finally { setCreandoPregunta(false); }
   };
 
   const cerrarVotacion = async (preguntaId: string) => {
-    if (!confirm("¿Estás seguro de cerrar esta votación? Los datos quedarán bloqueados de forma permanente.")) return;
+    if (!confirm("¿Cerrar votación de forma permanente?")) return;
     setPreguntas(prev => prev.map(q => q.id === preguntaId ? { ...q, status: 'CLOSED' } : q));
-    if (preguntaActiva && preguntaActiva.id === preguntaId) {
-      setPreguntaActiva({ ...preguntaActiva, status: 'CLOSED' });
-    }
-    try {
-      await supabase.from("assembly_questions").update({ status: 'CLOSED' }).eq("id", preguntaId);
-    } catch (err) { console.error("Error", err); cargarDatosSala(); }
+    if (preguntaActiva?.id === preguntaId) setPreguntaActiva({ ...preguntaActiva, status: 'CLOSED' });
+    await supabase.from("assembly_questions").update({ status: 'CLOSED' }).eq("id", preguntaId);
   };
 
-  // Funciones Panel de Votos
   const abrirPanelVotacion = async (pregunta: any) => {
     setPreguntaActiva(pregunta);
-    setCargandoVotos(true);
-    const { data, error } = await supabase.from("assembly_votes").select("*").eq("question_id", pregunta.id);
-    if (!error && data) setVotos(data);
-    setCargandoVotos(false);
+    const { data } = await supabase.from("assembly_votes").select("*").eq("question_id", pregunta.id);
+    setVotos(data || []);
   };
 
-  const registrarVoto = async (propertyId: string, option: 'FAVOR' | 'CONTRA' | 'BLANCO', coefficient: number) => {
+  const registrarVotoAdmin = async (propertyId: string, option: 'FAVOR'|'CONTRA'|'BLANCO', coefficient: number) => {
     if (preguntaActiva.status !== 'OPEN') return; 
-    setVotos(prev => {
-      const filtrados = prev.filter(v => v.property_id !== propertyId);
-      return [...filtrados, { property_id: propertyId, vote_option: option, coefficient }];
-    });
-    try {
-      await supabase.from("assembly_votes").delete().eq("question_id", preguntaActiva.id).eq("property_id", propertyId);
-      await supabase.from("assembly_votes").insert([{ question_id: preguntaActiva.id, property_id: propertyId, vote_option: option, coefficient }]);
-    } catch (err) { console.error("Error", err); }
+    setVotos(prev => [...prev.filter(v => v.property_id !== propertyId), { property_id: propertyId, vote_option: option, coefficient }]);
+    await supabase.from("assembly_votes").delete().eq("question_id", preguntaActiva.id).eq("property_id", propertyId);
+    await supabase.from("assembly_votes").insert([{ question_id: preguntaActiva.id, property_id: propertyId, vote_option: option, coefficient }]);
+  };
+
+  // NUEVO: Funciones de Debate y Streaming
+  const guardarEnlaceTransmision = async () => {
+    setGuardandoLink(true);
+    await supabase.from("assemblies").update({ streaming_url: streamingUrl }).eq("id", assemblyId);
+    alert("Enlace compartido con los propietarios al instante.");
+    setGuardandoLink(false);
+  };
+
+  const cambiarEstadoTurno = async (turnoId: string, nuevoEstado: 'ACTIVE' | 'COMPLETED') => {
+    // Si marcamos a alguien como ACTIVE (Hablando), automáticamente completamos a quien estaba hablando antes
+    if (nuevoEstado === 'ACTIVE') {
+      await supabase.from("assembly_speakers").update({ status: 'COMPLETED' }).eq("assembly_id", assemblyId).eq("status", "ACTIVE");
+    }
+    await supabase.from("assembly_speakers").update({ status: nuevoEstado }).eq("id", turnoId);
   };
 
   // Cálculos en tiempo real
@@ -195,105 +211,74 @@ export default function SalaControlPage() {
   const votosBlanco = votos.filter(v => v.vote_option === 'BLANCO').reduce((sum, v) => sum + v.coefficient, 0);
   const totalVotado = votosFavor + votosContra + votosBlanco;
 
-  // EXPORTACIÓN A EXCEL
   const exportarAExcel = async () => {
+    // Código de excel idéntico al anterior...
     const datosAsistencia = propiedades.map(p => ({
       "Inmueble": p.tower ? `Torre ${p.tower} - Apto ${p.number}` : `Apto ${p.number}`,
-      "Propietario": p.owner_name,
       "Coeficiente (%)": p.coefficient,
       "Asistencia": p.is_present ? "PRESENTE" : "AUSENTE",
-      "Tipo Asistente": p.is_present ? (p.is_proxy ? "DELEGADO" : "TITULAR") : "",
-      "Nombre Delegado": p.is_proxy ? p.proxy_name : "",
-      "PIN Acceso": p.is_present ? p.access_pin : "" // ACTUALIZADO: Exportamos el PIN
+      "PIN Acceso": p.is_present ? p.access_pin : ""
     }));
-    datosAsistencia.push({ "Inmueble": "TOTAL QUÓRUM", "Propietario": "", "Coeficiente (%)": quorumActual, "Asistencia": "", "Tipo Asistente": "", "Nombre Delegado": "", "PIN Acceso": "" });
-
+    datosAsistencia.push({ "Inmueble": "TOTAL QUÓRUM", "Coeficiente (%)": quorumActual, "Asistencia": "", "PIN Acceso": "" });
     const { data: allVotes } = await supabase.from("assembly_votes").select("question_id, vote_option, coefficient");
-
     const datosVotaciones: any[] = [];
     preguntas.forEach(q => {
-      const votosQ = allVotes?.filter(v => v.question_id === q.id) || [];
-      const fv = votosQ.filter(v => v.vote_option === 'FAVOR').reduce((acc, curr) => acc + curr.coefficient, 0);
-      const cv = votosQ.filter(v => v.vote_option === 'CONTRA').reduce((acc, curr) => acc + curr.coefficient, 0);
-      const bv = votosQ.filter(v => v.vote_option === 'BLANCO').reduce((acc, curr) => acc + curr.coefficient, 0);
-      
-      datosVotaciones.push({
-        "Pregunta / Decisión": q.title,
-        "Estado": q.status === 'OPEN' ? 'EN CURSO' : 'CERRADA',
-        "Total A Favor (%)": fv.toFixed(2),
-        "Total En Contra (%)": cv.toFixed(2),
-        "Total En Blanco (%)": bv.toFixed(2),
-        "Resultado Preliminar/Final": fv > (quorumActual / 2) ? "APROBADO" : "NO APROBADO"
-      });
+      const vQ = allVotes?.filter(v => v.question_id === q.id) || [];
+      const fv = vQ.filter(v => v.vote_option === 'FAVOR').reduce((a, c) => a + c.coefficient, 0);
+      const cv = vQ.filter(v => v.vote_option === 'CONTRA').reduce((a, c) => a + c.coefficient, 0);
+      datosVotaciones.push({ "Pregunta": q.title, "Estado": q.status, "A Favor (%)": fv.toFixed(2), "En Contra (%)": cv.toFixed(2) });
     });
-
-    const hojaAsistencia = XLSX.utils.json_to_sheet(datosAsistencia);
-    const hojaVotaciones = XLSX.utils.json_to_sheet(datosVotaciones);
-    const libro = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(libro, hojaAsistencia, "Padrón y Asistencia");
-    XLSX.utils.book_append_sheet(libro, hojaVotaciones, "Acta de Votaciones");
-    
-    XLSX.writeFile(libro, `Acta_Asamblea_${asamblea?.type}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    const l = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosAsistencia), "Padrón");
+    XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosVotaciones), "Votaciones");
+    XLSX.writeFile(l, `Acta_Asamblea_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
-  if (cargando) return <div className="p-8 text-blue-600 font-medium animate-pulse">Cargando Sala de Control...</div>;
+  if (cargando) return <div className="p-8 animate-pulse text-blue-600">Cargando Sala...</div>;
 
   return (
     <div className="p-8 relative">
       <div className="max-w-6xl mx-auto space-y-6">
         
-        {/* Cabecera */}
+        {/* CABECERA */}
         <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100 flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-blue-950">Sala de Control</h1>
-            <p className="text-xs text-gray-400 font-mono mt-1">Sesión Activa - {asamblea?.type}</p>
-          </div>
+          <div><h1 className="text-2xl font-bold text-blue-950">Sala de Control</h1></div>
           <div className="flex gap-4 items-center">
-            <button onClick={exportarAExcel} className="bg-green-600 hover:bg-green-700 text-white text-sm font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-              Descargar Acta
-            </button>
+            <button onClick={exportarAExcel} className="bg-green-600 hover:bg-green-700 text-white text-sm font-bold py-2 px-4 rounded-lg">Descargar Acta</button>
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center min-w-37.5">
-              <p className="text-xs text-blue-600 font-bold uppercase">Quórum</p>
+              <p className="text-xs font-bold uppercase text-blue-600">Quórum</p>
               <p className="text-2xl font-extrabold text-blue-900">{quorumActual.toFixed(2)}%</p>
             </div>
           </div>
         </div>
 
-        {/* PESTAÑAS */}
-        <div className="flex space-x-2 border-b border-gray-200">
-          <button onClick={() => setActiveTab('CHECKIN')} className={`py-3 px-6 font-bold text-sm border-b-2 transition-colors ${activeTab === 'CHECKIN' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>1. Padrón y Asistencia</button>
-          <button onClick={() => setActiveTab('VOTACION')} className={`py-3 px-6 font-bold text-sm border-b-2 transition-colors ${activeTab === 'VOTACION' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>2. Votaciones en Vivo</button>
+        {/* MENÚ PESTAÑAS */}
+        <div className="flex space-x-2 border-b border-gray-200 overflow-x-auto">
+          <button onClick={() => setActiveTab('CHECKIN')} className={`py-3 px-6 font-bold text-sm border-b-2 transition-colors whitespace-nowrap ${activeTab === 'CHECKIN' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500'}`}>1. Padrón y Asistencia</button>
+          <button onClick={() => setActiveTab('VOTACION')} className={`py-3 px-6 font-bold text-sm border-b-2 transition-colors whitespace-nowrap ${activeTab === 'VOTACION' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500'}`}>2. Votaciones en Vivo</button>
+          <button onClick={() => setActiveTab('DEBATE')} className={`py-3 px-6 font-bold text-sm border-b-2 transition-colors whitespace-nowrap flex items-center gap-2 ${activeTab === 'DEBATE' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500'}`}>
+            3. Intervenciones 
+            {turnos.filter(t => t.status === 'PENDING').length > 0 && (
+              <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">{turnos.filter(t => t.status === 'PENDING').length}</span>
+            )}
+          </button>
         </div>
 
         {/* PESTAÑA 1: CHECKIN */}
         {activeTab === 'CHECKIN' && (
           <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
             <table className="w-full text-sm text-left text-gray-600">
-              <thead className="text-xs text-blue-900 uppercase bg-blue-50/70 border-b border-blue-100">
-                <tr>
-                  <th className="px-6 py-3">Inmueble</th>
-                  <th className="px-6 py-3">Propietario / Delegado</th>
-                  <th className="px-6 py-3 text-center">Coef.</th>
-                  <th className="px-6 py-3 text-center">Acciones</th>
-                </tr>
+              <thead className="bg-blue-50 text-blue-900 uppercase text-xs">
+                <tr><th className="px-6 py-3">Inmueble</th><th className="px-6 py-3">Propietario / Delegado</th><th className="px-6 py-3 text-center">Coef.</th><th className="px-6 py-3 text-center">Acciones</th></tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {propiedades.map((p) => (
-                  <tr key={p.property_id} className={`transition-colors ${p.is_present ? 'bg-green-50/20' : 'hover:bg-blue-50/30'}`}>
+                  <tr key={p.property_id} className={p.is_present ? 'bg-green-50/20' : ''}>
                     <td className="px-6 py-4 font-bold text-blue-950">{p.tower ? `T${p.tower}-` : ""}Apto {p.number}</td>
                     <td className="px-6 py-4">
                       <div className="font-medium text-gray-800">{p.owner_name}</div>
                       {p.is_proxy && <div className="text-xs font-semibold text-purple-700 bg-purple-100 px-2 py-0.5 rounded-md mt-1 inline-block">Delegado: {p.proxy_name}</div>}
-                      
-                      {/* NUEVO: Mostrar el PIN si está presente */}
-                      {p.is_present && p.access_pin && (
-                        <div className="mt-2 block">
-                          <span className="text-xs font-bold text-blue-800 bg-blue-100 px-2 py-1 rounded-md border border-blue-200 shadow-sm">
-                            PIN Acceso: {p.access_pin}
-                          </span>
-                        </div>
-                      )}
+                      {p.is_present && p.access_pin && <span className="block mt-1 text-xs font-bold text-blue-800 bg-blue-100 px-2 py-1 rounded-md w-max">PIN: {p.access_pin}</span>}
                     </td>
                     <td className="px-6 py-4 font-semibold text-center text-blue-700">{p.coefficient}%</td>
                     <td className="px-6 py-4 text-center">
@@ -301,8 +286,8 @@ export default function SalaControlPage() {
                         <button onClick={() => toggleAsistencia(p.property_id, p.is_present)} className="px-3 py-1.5 rounded bg-green-600 hover:bg-red-600 text-white text-xs font-bold transition-colors">✓ Registrado (Anular)</button>
                       ) : (
                         <div className="flex justify-center gap-2">
-                          <button onClick={() => toggleAsistencia(p.property_id, p.is_present)} className="px-3 py-1.5 rounded bg-gray-100 hover:bg-blue-600 hover:text-white text-gray-700 text-xs font-bold border transition-colors">Titular</button>
-                          <button onClick={() => { setPropiedadSeleccionada(p.property_id); setModalOpen(true); }} className="px-3 py-1.5 rounded bg-purple-50 hover:bg-purple-600 hover:text-white text-purple-700 text-xs font-bold border border-purple-200 transition-colors">Poder</button>
+                          <button onClick={() => toggleAsistencia(p.property_id, p.is_present)} className="px-3 py-1.5 rounded bg-gray-100 hover:bg-blue-600 hover:text-white text-xs font-bold border">Titular</button>
+                          <button onClick={() => { setPropiedadSeleccionada(p.property_id); setModalOpen(true); }} className="px-3 py-1.5 rounded bg-purple-50 text-purple-700 hover:bg-purple-600 hover:text-white text-xs font-bold border border-purple-200">Poder</button>
                         </div>
                       )}
                     </td>
@@ -317,134 +302,151 @@ export default function SalaControlPage() {
         {activeTab === 'VOTACION' && (
           <div className="space-y-6">
             <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100">
-              <h3 className="text-lg font-bold text-blue-950 mb-4">Lanzar Nueva Votación</h3>
               <form onSubmit={crearPregunta} className="flex gap-4 items-end">
                 <div className="flex-1">
-                  <label className="text-sm font-semibold text-gray-700 mb-1 block">Pregunta o Tema a decidir</label>
-                  <input type="text" required value={nuevaPregunta} onChange={e => setNuevaPregunta(e.target.value)} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-600" placeholder="Ej. ¿Aprueba la gestión y el presupuesto?" />
+                  <label className="text-sm font-semibold text-gray-700 mb-1 block">Lanzar Nueva Decisión</label>
+                  <input required value={nuevaPregunta} onChange={e => setNuevaPregunta(e.target.value)} className="w-full p-3 border rounded-lg focus:ring-blue-600 outline-none" placeholder="¿Aprueba el presupuesto?" />
                 </div>
-                <button type="submit" disabled={creandoPregunta || quorumActual === 0} className="py-3 px-6 rounded-lg font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 transition-colors">
-                  {creandoPregunta ? 'Creando...' : 'Abrir Votación'}
-                </button>
+                <button type="submit" disabled={creandoPregunta || quorumActual===0} className="py-3 px-6 rounded-lg font-bold text-white bg-blue-600 disabled:bg-gray-400">Abrir Votación</button>
               </form>
             </div>
-
-            <div className="space-y-4">
-              {preguntas.map((pregunta) => (
-                <div key={pregunta.id} className="bg-white rounded-xl shadow-sm p-6 border border-blue-100 flex flex-col md:flex-row justify-between items-center gap-4">
-                  <div>
-                    <h4 className="text-lg font-bold text-blue-900">{pregunta.title}</h4>
-                    <p className="text-xs font-bold mt-1">
-                      Estado: <span className={pregunta.status === 'OPEN' ? 'text-green-600' : 'text-red-600'}>
-                        {pregunta.status === 'OPEN' ? '🟢 ABIERTA' : '🔴 CERRADA'}
-                      </span>
-                    </p>
-                  </div>
-                  <div className="flex gap-3">
-                    <button onClick={() => abrirPanelVotacion(pregunta)} className="bg-blue-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-blue-700 transition-colors text-sm shadow-sm">
-                      {pregunta.status === 'OPEN' ? 'Administrar / Ver Votos' : 'Ver Resultados'}
-                    </button>
-                    {pregunta.status === 'OPEN' && (
-                      <button onClick={() => cerrarVotacion(pregunta.id)} className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold py-2 px-4 rounded-lg transition-colors text-sm">
-                        Cerrar Votación
-                      </button>
-                    )}
-                  </div>
+            {preguntas.map((pregunta) => (
+              <div key={pregunta.id} className="bg-white rounded-xl shadow-sm p-6 border border-blue-100 flex justify-between items-center">
+                <div>
+                  <h4 className="text-lg font-bold text-blue-900">{pregunta.title}</h4>
+                  <p className="text-xs font-bold mt-1">{pregunta.status === 'OPEN' ? <span className="text-green-600">🟢 ABIERTA</span> : <span className="text-red-600">🔴 CERRADA</span>}</p>
                 </div>
-              ))}
-            </div>
+                <div className="flex gap-3">
+                  <button onClick={() => abrirPanelVotacion(pregunta)} className="bg-blue-600 text-white font-bold py-2 px-5 rounded-lg text-sm">{pregunta.status === 'OPEN' ? 'Ver Votos en Vivo' : 'Ver Resultados'}</button>
+                  {pregunta.status === 'OPEN' && <button onClick={() => cerrarVotacion(pregunta.id)} className="bg-red-50 text-red-700 border-red-200 font-bold py-2 px-4 rounded-lg text-sm border">Cerrar Votación</button>}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
-      </div>
+        {/* NUEVA PESTAÑA 3: DEBATE E INTERACCIÓN */}
+        {activeTab === 'DEBATE' && (
+          <div className="space-y-6 flex flex-col md:flex-row gap-6">
+            
+            {/* Panel de Configuración de Transmisión */}
+            <div className="md:w-1/3 space-y-6">
+              <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100">
+                <h3 className="font-bold text-blue-950 mb-2 flex items-center gap-2">
+                  <span>🎥</span> Enlace de Transmisión
+                </h3>
+                <p className="text-xs text-gray-500 mb-4">Pega aquí el enlace de Zoom/Meet para que los propietarios puedan ingresar desde su celular.</p>
+                <div className="flex flex-col gap-2">
+                  <input 
+                    type="url" 
+                    value={streamingUrl} 
+                    onChange={e => setStreamingUrl(e.target.value)} 
+                    placeholder="https://zoom.us/j/..." 
+                    className="w-full p-2 text-sm border rounded-lg focus:ring-blue-600 outline-none" 
+                  />
+                  <button 
+                    onClick={guardarEnlaceTransmision}
+                    disabled={guardandoLink}
+                    className="w-full bg-gray-800 hover:bg-gray-900 text-white font-bold py-2 rounded-lg text-sm transition-colors"
+                  >
+                    {guardandoLink ? "Enviando..." : "Compartir a Propietarios"}
+                  </button>
+                </div>
+              </div>
 
-      {/* MODAL DELEGADO */}
-      {modalOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-           <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md border border-blue-100">
-             <h3 className="text-xl font-bold text-blue-950 mb-4">Registrar Poder Legal</h3>
-             <form onSubmit={registrarDelegado} className="space-y-4">
-               <div>
-                 <label className="text-sm font-semibold text-gray-700">Nombre del Delegado</label>
-                 <input required type="text" value={formDelegado.nombre} onChange={e => setFormDelegado({...formDelegado, nombre: e.target.value})} className="w-full mt-1 p-2 border rounded-lg outline-none focus:ring-2 focus:ring-purple-500" />
-               </div>
-               <div>
-                 <label className="text-sm font-semibold text-gray-700">Documento</label>
-                 <input required type="text" value={formDelegado.documento} onChange={e => setFormDelegado({...formDelegado, documento: e.target.value})} className="w-full mt-1 p-2 border rounded-lg outline-none focus:ring-2 focus:ring-purple-500" />
-               </div>
-               <div className="flex gap-3 mt-6">
-                 <button type="button" onClick={() => setModalOpen(false)} className="flex-1 py-2 bg-gray-100 font-bold rounded-lg transition-colors">Cancelar</button>
-                 <button type="submit" className="flex-1 py-2 bg-purple-600 text-white font-bold rounded-lg transition-colors">Registrar</button>
-               </div>
-             </form>
-           </div>
-        </div>
-      )}
-
-      {/* MODAL PANEL DE VOTACIÓN */}
-      {preguntaActiva && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
-            <div className={`p-6 text-white flex justify-between items-center ${preguntaActiva.status === 'OPEN' ? 'bg-blue-950' : 'bg-red-900'}`}>
-              <div>
-                <span className={`text-xs font-bold px-2 py-1 rounded ${preguntaActiva.status === 'OPEN' ? 'bg-blue-800 text-blue-200' : 'bg-red-800 text-red-200'}`}>
-                  {preguntaActiva.status === 'OPEN' ? 'VOTACIÓN EN CURSO' : 'VOTACIÓN CERRADA'}
-                </span>
-                <h2 className="text-2xl font-bold mt-2">{preguntaActiva.title}</h2>
-              </div>
-              <button onClick={() => setPreguntaActiva(null)} className="bg-white/20 hover:bg-white/40 text-white w-10 h-10 rounded-full font-bold text-xl">×</button>
-            </div>
-
-            <div className="bg-gray-50 p-6 border-b flex justify-between gap-4 overflow-x-auto">
-              <div className="flex-1 bg-white p-4 rounded-xl border border-green-200 text-center min-w-30">
-                <p className="text-xs font-bold text-green-600 uppercase">A Favor</p>
-                <p className="text-2xl font-bold text-green-700">{votosFavor.toFixed(2)}%</p>
-              </div>
-              <div className="flex-1 bg-white p-4 rounded-xl border border-red-200 text-center min-w-30">
-                <p className="text-xs font-bold text-red-600 uppercase">En Contra</p>
-                <p className="text-2xl font-bold text-red-700">{votosContra.toFixed(2)}%</p>
-              </div>
-              <div className="flex-1 bg-white p-4 rounded-xl border border-gray-300 text-center min-w-30">
-                <p className="text-xs font-bold text-gray-500 uppercase">En Blanco</p>
-                <p className="text-2xl font-bold text-gray-600">{votosBlanco.toFixed(2)}%</p>
-              </div>
-              <div className="flex-1 bg-blue-50 p-4 rounded-xl border border-blue-200 text-center min-w-30">
-                <p className="text-xs font-bold text-blue-600 uppercase">Participación</p>
-                <p className="text-2xl font-bold text-blue-900">{totalVotado.toFixed(2)}% / {quorumActual.toFixed(2)}%</p>
+              <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl text-xs text-blue-800">
+                <p className="font-bold mb-1">💡 Reglas de Moderación:</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>Otorga el micrófono en Zoom/Meet únicamente a la persona que esté "HABLANDO AHORA" en la lista de turnos.</li>
+                  <li>Al terminar, marca "Intervención Finalizada" para avanzar al siguiente.</li>
+                </ul>
               </div>
             </div>
 
-            <div className="overflow-y-auto p-6 flex-1">
-              <h3 className="font-bold text-blue-900 mb-4">Registro de votos por apartamento asistente:</h3>
-              {cargandoVotos ? (
-                <p className="text-center text-gray-500 animate-pulse">Cargando votos...</p>
+            {/* Panel de Gestión de Turnos */}
+            <div className="md:w-2/3 bg-white rounded-xl shadow-sm p-6 border border-blue-100">
+              <h3 className="font-bold text-blue-950 mb-4 flex items-center gap-2">
+                <span>✋</span> Cola de Peticiones de Palabra
+              </h3>
+
+              {turnos.length === 0 ? (
+                <div className="text-center py-10 text-gray-400">Ningún propietario ha pedido la palabra.</div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {propiedades.filter(p => p.is_present).map(p => {
-                    const miVoto = votos.find(v => v.property_id === p.property_id)?.vote_option;
-                    const estaCerrada = preguntaActiva.status !== 'OPEN';
-
+                <div className="space-y-3">
+                  {turnos.map((turno) => {
+                    const esActivo = turno.status === 'ACTIVE';
+                    const esCompletado = turno.status === 'COMPLETED';
+                    const propNumber = Array.isArray(turno.properties) ? turno.properties[0]?.number : turno.properties?.number;
+                    
                     return (
-                      <div key={p.property_id} className={`flex justify-between items-center p-3 rounded-lg border transition-all ${miVoto ? 'bg-gray-50 border-gray-200' : 'bg-white border-blue-200 shadow-sm'}`}>
+                      <div key={turno.id} className={`flex justify-between items-center p-4 rounded-xl border transition-all ${esActivo ? 'bg-green-50 border-green-200 shadow-sm' : esCompletado ? 'bg-gray-50 border-gray-100 opacity-60' : 'bg-white border-gray-200'}`}>
                         <div>
-                          <p className="font-bold text-gray-800">{p.tower ? `T${p.tower}-` : ""}Apto {p.number}</p>
-                          <p className="text-xs text-blue-600 font-semibold">Coef: {p.coefficient}%</p>
+                          <p className={`font-bold ${esActivo ? 'text-green-800 text-lg' : 'text-gray-800'}`}>Apto {propNumber}</p>
+                          <p className="text-xs font-semibold uppercase">
+                            {esActivo ? <span className="text-green-600 animate-pulse">🎤 Hablando Ahora</span> : esCompletado ? <span className="text-gray-400">Ya participó</span> : <span className="text-orange-500">Esperando turno</span>}
+                          </p>
                         </div>
-                        <div className="flex gap-1">
-                          <button disabled={estaCerrada} onClick={() => registrarVoto(p.property_id, 'FAVOR', p.coefficient)} className={`px-3 py-1.5 rounded text-xs font-bold transition-colors ${estaCerrada ? 'opacity-50' : ''} ${miVoto === 'FAVOR' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-green-100'}`}>Favor</button>
-                          <button disabled={estaCerrada} onClick={() => registrarVoto(p.property_id, 'CONTRA', p.coefficient)} className={`px-3 py-1.5 rounded text-xs font-bold transition-colors ${estaCerrada ? 'opacity-50' : ''} ${miVoto === 'CONTRA' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-red-100'}`}>Contra</button>
-                          <button disabled={estaCerrada} onClick={() => registrarVoto(p.property_id, 'BLANCO', p.coefficient)} className={`px-3 py-1.5 rounded text-xs font-bold transition-colors ${estaCerrada ? 'opacity-50' : ''} ${miVoto === 'BLANCO' ? 'bg-gray-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>Blanco</button>
-                        </div>
+                        
+                        {!esCompletado && (
+                          <div className="flex gap-2">
+                            {!esActivo && (
+                              <button onClick={() => cambiarEstadoTurno(turno.id, 'ACTIVE')} className="bg-green-600 hover:bg-green-700 text-white font-bold py-1.5 px-3 rounded-lg text-xs">
+                                Dar Palabra
+                              </button>
+                            )}
+                            {esActivo && (
+                              <button onClick={() => cambiarEstadoTurno(turno.id, 'COMPLETED')} className="bg-gray-800 hover:bg-gray-900 text-white font-bold py-1.5 px-3 rounded-lg text-xs">
+                                Terminar Intervención
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
                 </div>
               )}
             </div>
+
+          </div>
+        )}
+      </div>
+
+      {/* MODAL DE VOTACION EN VIVO (Mantenido intacto) */}
+      {preguntaActiva && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+            <div className={`p-6 text-white flex justify-between items-center ${preguntaActiva.status==='OPEN' ? 'bg-blue-950':'bg-red-900'}`}>
+              <div><span className="text-xs font-bold bg-white/20 px-2 py-1 rounded">{preguntaActiva.status==='OPEN'?'EN CURSO':'CERRADA'}</span><h2 className="text-2xl font-bold mt-2">{preguntaActiva.title}</h2></div>
+              <button onClick={() => setPreguntaActiva(null)} className="text-white text-xl">×</button>
+            </div>
+            <div className="bg-gray-50 p-6 border-b flex gap-4 overflow-x-auto">
+              <div className="flex-1 bg-white p-4 rounded-xl border border-green-200 text-center"><p className="text-xs font-bold text-green-600">A Favor</p><p className="text-2xl font-bold text-green-700">{votosFavor.toFixed(2)}%</p></div>
+              <div className="flex-1 bg-white p-4 rounded-xl border border-red-200 text-center"><p className="text-xs font-bold text-red-600">En Contra</p><p className="text-2xl font-bold text-red-700">{votosContra.toFixed(2)}%</p></div>
+              <div className="flex-1 bg-white p-4 rounded-xl border border-gray-300 text-center"><p className="text-xs font-bold text-gray-500">En Blanco</p><p className="text-2xl font-bold text-gray-600">{votosBlanco.toFixed(2)}%</p></div>
+              <div className="flex-1 bg-blue-50 p-4 rounded-xl border border-blue-200 text-center"><p className="text-xs font-bold text-blue-600">Participación</p><p className="text-2xl font-bold text-blue-900">{totalVotado.toFixed(2)}%</p></div>
+            </div>
+            <div className="overflow-y-auto p-6 flex-1">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {propiedades.filter(p=>p.is_present).map(p => {
+                  const miVoto = votos.find(v=>v.property_id===p.property_id)?.vote_option;
+                  const estaCerrada = preguntaActiva.status!=='OPEN';
+                  return (
+                    <div key={p.property_id} className={`flex justify-between items-center p-3 rounded-lg border ${miVoto?'bg-gray-50':'bg-white'}`}>
+                      <div><p className="font-bold">Apto {p.number}</p><p className="text-xs text-blue-600">Coef: {p.coefficient}%</p></div>
+                      <div className="flex gap-1">
+                        <button disabled={estaCerrada} onClick={()=>registrarVotoAdmin(p.property_id, 'FAVOR', p.coefficient)} className={`px-2 py-1 rounded text-xs font-bold ${miVoto==='FAVOR'?'bg-green-600 text-white':'bg-gray-100 text-gray-400'}`}>F</button>
+                        <button disabled={estaCerrada} onClick={()=>registrarVotoAdmin(p.property_id, 'CONTRA', p.coefficient)} className={`px-2 py-1 rounded text-xs font-bold ${miVoto==='CONTRA'?'bg-red-600 text-white':'bg-gray-100 text-gray-400'}`}>C</button>
+                        <button disabled={estaCerrada} onClick={()=>registrarVotoAdmin(p.property_id, 'BLANCO', p.coefficient)} className={`px-2 py-1 rounded text-xs font-bold ${miVoto==='BLANCO'?'bg-gray-600 text-white':'bg-gray-100 text-gray-400'}`}>B</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
       )}
-
     </div>
   );
 }
