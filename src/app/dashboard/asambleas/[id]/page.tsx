@@ -228,7 +228,7 @@ export default function SalaControlPage() {
 
   const exportarAExcel = async () => {
     try {
-      // 1. Datos Asistencia - NUEVO: Se incluye la columna Documento
+      // 1. HOJA DE PADRÓN Y ASISTENCIA
       const datosAsistencia = propiedades.map(p => ({
         "Inmueble": p.tower ? `Torre ${p.tower} - Apto ${p.number}` : `Apto ${p.number}`,
         "Coeficiente (%)": p.coefficient,
@@ -242,32 +242,56 @@ export default function SalaControlPage() {
       
       const questionIds = preguntas.map(q => q.id);
       
+      // Aseguramos traer el property_id para la matriz detallada
       const { data: allVotes, error: votesError } = await supabase
         .from("assembly_votes")
-        .select("question_id, vote_option, coefficient")
+        .select("question_id, property_id, vote_option, coefficient")
         .in("question_id", questionIds.length > 0 ? questionIds : ['dummy-id']);
 
       if (votesError) throw votesError;
 
+      // 2. HOJA DE RESULTADOS GENERALES (Con conversión estricta a Number)
       const datosVotaciones: any[] = [];
       preguntas.forEach(q => {
         const vQ = allVotes?.filter(v => v.question_id === q.id) || [];
-        const fv = vQ.filter(v => v.vote_option === 'FAVOR').reduce((a, c) => a + c.coefficient, 0);
-        const cv = vQ.filter(v => v.vote_option === 'CONTRA').reduce((a, c) => a + c.coefficient, 0);
-        const bv = vQ.filter(v => v.vote_option === 'BLANCO').reduce((a, c) => a + c.coefficient, 0);
+        const fv = vQ.filter(v => v.vote_option === 'FAVOR').reduce((a, c) => a + Number(c.coefficient), 0);
+        const cv = vQ.filter(v => v.vote_option === 'CONTRA').reduce((a, c) => a + Number(c.coefficient), 0);
+        const bv = vQ.filter(v => v.vote_option === 'BLANCO').reduce((a, c) => a + Number(c.coefficient), 0);
+        
         datosVotaciones.push({ 
           "Pregunta": q.title, 
-          "Estado": q.status, 
-          "A Favor (%)": fv.toFixed(2), 
-          "En Contra (%)": cv.toFixed(2),
-          "En Blanco (%)": bv.toFixed(2),
-          "Total Participación (%)": (fv + cv + bv).toFixed(2)
+          "Estado": q.status === 'OPEN' ? 'ABIERTA' : 'CERRADA', 
+          "A Favor (%)": fv.toFixed(3), 
+          "En Contra (%)": cv.toFixed(3),
+          "En Blanco (%)": bv.toFixed(3),
+          "Total Participación (%)": (fv + cv + bv).toFixed(3)
         });
       });
+
+      // 3. NUEVA HOJA: MATRIZ DETALLADA DE VOTOS POR INMUEBLE
+      const detalleVotos = propiedades.map(p => {
+        // Datos base del inmueble
+        const filaDetalle: any = {
+          "Inmueble": p.tower ? `Torre ${p.tower} - Apto ${p.number}` : `Apto ${p.number}`,
+          "Coeficiente (%)": p.coefficient,
+          "Asistencia": p.is_present ? "PRESENTE" : "AUSENTE"
+        };
+
+        // Creamos una columna dinámica por cada pregunta de la asamblea
+        preguntas.forEach(q => {
+          const votoInmueble = allVotes?.find(v => v.question_id === q.id && v.property_id === p.property_id);
+          filaDetalle[q.title] = votoInmueble ? votoInmueble.vote_option : "NO VOTÓ";
+        });
+
+        return filaDetalle;
+      });
       
+      // Creación del libro de Excel con las 3 hojas
       const l = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosAsistencia), "Padrón");
-      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosVotaciones), "Votaciones");
+      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosAsistencia), "1. Padrón");
+      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosVotaciones), "2. Resultados Totales");
+      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(detalleVotos), "3. Detalle por Inmueble");
+      
       XLSX.writeFile(l, `Acta_Asamblea_${asamblea?.name ? asamblea.name.replace(/\s+/g, '_') : new Date().toISOString().split('T')[0]}.xlsx`);
     } catch (err) {
       alert("Hubo un error al generar el archivo Excel. Verifica la conexión.");
