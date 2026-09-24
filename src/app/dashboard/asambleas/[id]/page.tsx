@@ -133,14 +133,26 @@ export default function SalaControlPage() {
   }, [preguntaActiva, assemblyId]);
 
   // Funciones Check-in
+  // Funciones Check-in
   const toggleAsistencia = async (propertyId: string, estadoActual: boolean) => {
     const nuevoEstado = !estadoActual;
     const nuevoPin = nuevoEstado ? generarPin() : "";
+    
+    // UI Optimista: Actualiza la pantalla primero
     setPropiedades(prev => prev.map(p => p.property_id === propertyId ? { ...p, is_present: nuevoEstado, is_proxy: false, proxy_name: "", proxy_document: "", access_pin: nuevoPin } : p));
+    
     try {
-      if (nuevoEstado) await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propertyId, is_present: true, access_pin: nuevoPin }]);
-      else await supabase.from("assembly_attendees").delete().eq("assembly_id", assemblyId).eq("property_id", propertyId);
-    } catch (err) { cargarDatosSala(); }
+      if (nuevoEstado) {
+        const { error } = await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propertyId, is_present: true, access_pin: nuevoPin }]);
+        if (error) throw error; // AHORA SÍ detectará el error
+      } else {
+        const { error } = await supabase.from("assembly_attendees").delete().eq("assembly_id", assemblyId).eq("property_id", propertyId);
+        if (error) throw error;
+      }
+    } catch (err: any) { 
+      setError("Error al guardar asistencia: " + (err.message || "Fallo RLS en BD"));
+      cargarDatosSala(); // Si falla, recargamos la BD para revertir el "espejismo" en la UI
+    }
   };
 
   const registrarDelegado = async (e: React.FormEvent) => {
@@ -149,13 +161,12 @@ export default function SalaControlPage() {
     
     const nuevoPin = generarPin();
     
-    // NUEVO: Agregamos proxy_document a la actualización visual
+    // UI Optimista
     setPropiedades(prev => prev.map(p => p.property_id === propiedadSeleccionada ? { ...p, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, proxy_document: formDelegado.documento, access_pin: nuevoPin } : p));
     setModalOpen(false);
     
     try {
-      // NUEVO: Guardamos proxy_document en Supabase
-      await supabase.from("assembly_attendees").insert([{ 
+      const { error } = await supabase.from("assembly_attendees").insert([{ 
         assembly_id: assemblyId, 
         property_id: propiedadSeleccionada, 
         is_present: true, 
@@ -164,9 +175,12 @@ export default function SalaControlPage() {
         proxy_document: formDelegado.documento,
         access_pin: nuevoPin 
       }]);
+      
+      if (error) throw error; // AHORA SÍ detectará el error
+      
       setFormDelegado({ nombre: "", documento: "" });
-    } catch (err) { 
-      setError("Error al guardar el delegado. Verifique la conexión.");
+    } catch (err: any) { 
+      setError("Error al guardar el delegado: " + (err.message || "Fallo RLS en BD"));
       cargarDatosSala(); 
     }
   };
