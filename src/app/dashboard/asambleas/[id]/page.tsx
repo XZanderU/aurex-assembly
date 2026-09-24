@@ -14,6 +14,7 @@ interface PropertyWithOwner {
   is_present: boolean;
   is_proxy?: boolean;
   proxy_name?: string;
+  proxy_document?: string; // NUEVO: Se agrega el documento a la interfaz
   access_pin?: string;
 }
 
@@ -28,7 +29,7 @@ export default function SalaControlPage() {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Estados de UI (Ahora con 3 pestañas)
+  // Estados de UI
   const [activeTab, setActiveTab] = useState<'CHECKIN' | 'VOTACION' | 'DEBATE'>('CHECKIN');
   
   // Estados para Delegados
@@ -42,7 +43,7 @@ export default function SalaControlPage() {
   const [preguntaActiva, setPreguntaActiva] = useState<any>(null);
   const [votos, setVotos] = useState<any[]>([]);
   
-  // NUEVO: Estados para Debate y Enlace
+  // Estados para Debate y Enlace
   const [turnos, setTurnos] = useState<any[]>([]);
   const [streamingUrl, setStreamingUrl] = useState("");
   const [guardandoLink, setGuardandoLink] = useState(false);
@@ -63,14 +64,14 @@ export default function SalaControlPage() {
       const { data: asmData, error: asmError } = await supabase.from("assemblies").select("*").eq("id", assemblyId).single();
       if (asmError) throw asmError;
       setAsamblea(asmData);
-      setStreamingUrl(asmData.streaming_url || ""); // Cargar link existente
+      setStreamingUrl(asmData.streaming_url || "");
 
       const { data: propData } = await supabase.from("properties").select("id, tower, number, coefficient").eq("complex_id", complexId);
       const { data: relData } = await supabase.from("property_owners").select("property_id, owners(full_name)").eq("is_main_contact", true);
-      const { data: attData } = await supabase.from("assembly_attendees").select("property_id, is_present, is_proxy, proxy_name, access_pin").eq("assembly_id", assemblyId);
+      // NUEVO: Ahora solicitamos proxy_document de la base de datos
+      const { data: attData } = await supabase.from("assembly_attendees").select("property_id, is_present, is_proxy, proxy_name, proxy_document, access_pin").eq("assembly_id", assemblyId);
       const { data: qData } = await supabase.from("assembly_questions").select("*").eq("assembly_id", assemblyId).order("created_at", { ascending: false });
       
-      // Cargar turnos iniciales
       const { data: turnosData } = await supabase.from("assembly_speakers").select("*, properties(number, tower)").eq("assembly_id", assemblyId).order("created_at", { ascending: true });
 
       setPreguntas(qData || []);
@@ -90,6 +91,7 @@ export default function SalaControlPage() {
           is_present: asistencia ? asistencia.is_present : false,
           is_proxy: asistencia ? asistencia.is_proxy : false,
           proxy_name: asistencia ? asistencia.proxy_name : undefined,
+          proxy_document: asistencia ? asistencia.proxy_document : undefined, // NUEVO
           access_pin: asistencia ? asistencia.access_pin : undefined,
         };
       });
@@ -98,7 +100,7 @@ export default function SalaControlPage() {
       setPropiedades(listaUnificada);
       setError(null);
     } catch (err: any) {
-      setError("Error al cargar la sala.");
+      setError("Error al cargar la sala de asamblea.");
     } finally {
       setCargando(false);
     }
@@ -110,7 +112,6 @@ export default function SalaControlPage() {
 
   // TIEMPO REAL ADMINISTRADOR (Votos y Turnos)
   useEffect(() => {
-    // 1. Escuchar Votos (Si hay pregunta activa)
     let canalVotos: any;
     if (preguntaActiva && preguntaActiva.status === 'OPEN') {
       canalVotos = supabase.channel('votos-admin-vivo')
@@ -119,10 +120,8 @@ export default function SalaControlPage() {
         }).subscribe();
     }
 
-    // 2. Escuchar Nuevos Turnos de Debate (Siempre activo)
     const canalTurnos = supabase.channel('turnos-admin-vivo')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'assembly_speakers', filter: `assembly_id=eq.${assemblyId}` }, async (payload) => {
-        // Recargamos los turnos al haber cambios para traer el cruce de tablas actualizado
         const { data: turnosData } = await supabase.from("assembly_speakers").select("*, properties(number, tower)").eq("assembly_id", assemblyId).order("created_at", { ascending: true });
         setTurnos(turnosData || []);
       }).subscribe();
@@ -137,7 +136,7 @@ export default function SalaControlPage() {
   const toggleAsistencia = async (propertyId: string, estadoActual: boolean) => {
     const nuevoEstado = !estadoActual;
     const nuevoPin = nuevoEstado ? generarPin() : "";
-    setPropiedades(prev => prev.map(p => p.property_id === propertyId ? { ...p, is_present: nuevoEstado, is_proxy: false, proxy_name: "", access_pin: nuevoPin } : p));
+    setPropiedades(prev => prev.map(p => p.property_id === propertyId ? { ...p, is_present: nuevoEstado, is_proxy: false, proxy_name: "", proxy_document: "", access_pin: nuevoPin } : p));
     try {
       if (nuevoEstado) await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propertyId, is_present: true, access_pin: nuevoPin }]);
       else await supabase.from("assembly_attendees").delete().eq("assembly_id", assemblyId).eq("property_id", propertyId);
@@ -147,12 +146,29 @@ export default function SalaControlPage() {
   const registrarDelegado = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!propiedadSeleccionada) return;
+    
     const nuevoPin = generarPin();
-    setPropiedades(prev => prev.map(p => p.property_id === propiedadSeleccionada ? { ...p, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, access_pin: nuevoPin } : p));
+    
+    // NUEVO: Agregamos proxy_document a la actualización visual
+    setPropiedades(prev => prev.map(p => p.property_id === propiedadSeleccionada ? { ...p, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, proxy_document: formDelegado.documento, access_pin: nuevoPin } : p));
     setModalOpen(false);
+    
     try {
-      await supabase.from("assembly_attendees").insert([{ assembly_id: assemblyId, property_id: propiedadSeleccionada, is_present: true, is_proxy: true, proxy_name: formDelegado.nombre, access_pin: nuevoPin }]);
-    } catch (err) { cargarDatosSala(); }
+      // NUEVO: Guardamos proxy_document en Supabase
+      await supabase.from("assembly_attendees").insert([{ 
+        assembly_id: assemblyId, 
+        property_id: propiedadSeleccionada, 
+        is_present: true, 
+        is_proxy: true, 
+        proxy_name: formDelegado.nombre, 
+        proxy_document: formDelegado.documento,
+        access_pin: nuevoPin 
+      }]);
+      setFormDelegado({ nombre: "", documento: "" });
+    } catch (err) { 
+      setError("Error al guardar el delegado. Verifique la conexión.");
+      cargarDatosSala(); 
+    }
   };
 
   // Funciones Preguntas
@@ -188,7 +204,7 @@ export default function SalaControlPage() {
     await supabase.from("assembly_votes").insert([{ question_id: preguntaActiva.id, property_id: propertyId, vote_option: option, coefficient }]);
   };
 
-  // NUEVO: Funciones de Debate y Streaming
+  // Funciones de Debate y Streaming
   const guardarEnlaceTransmision = async () => {
     setGuardandoLink(true);
     await supabase.from("assemblies").update({ streaming_url: streamingUrl }).eq("id", assemblyId);
@@ -197,7 +213,6 @@ export default function SalaControlPage() {
   };
 
   const cambiarEstadoTurno = async (turnoId: string, nuevoEstado: 'ACTIVE' | 'COMPLETED') => {
-    // Si marcamos a alguien como ACTIVE (Hablando), automáticamente completamos a quien estaba hablando antes
     if (nuevoEstado === 'ACTIVE') {
       await supabase.from("assembly_speakers").update({ status: 'COMPLETED' }).eq("assembly_id", assemblyId).eq("status", "ACTIVE");
     }
@@ -212,26 +227,51 @@ export default function SalaControlPage() {
   const totalVotado = votosFavor + votosContra + votosBlanco;
 
   const exportarAExcel = async () => {
-    // Código de excel idéntico al anterior...
-    const datosAsistencia = propiedades.map(p => ({
-      "Inmueble": p.tower ? `Torre ${p.tower} - Apto ${p.number}` : `Apto ${p.number}`,
-      "Coeficiente (%)": p.coefficient,
-      "Asistencia": p.is_present ? "PRESENTE" : "AUSENTE",
-      "PIN Acceso": p.is_present ? p.access_pin : ""
-    }));
-    datosAsistencia.push({ "Inmueble": "TOTAL QUÓRUM", "Coeficiente (%)": quorumActual, "Asistencia": "", "PIN Acceso": "" });
-    const { data: allVotes } = await supabase.from("assembly_votes").select("question_id, vote_option, coefficient");
-    const datosVotaciones: any[] = [];
-    preguntas.forEach(q => {
-      const vQ = allVotes?.filter(v => v.question_id === q.id) || [];
-      const fv = vQ.filter(v => v.vote_option === 'FAVOR').reduce((a, c) => a + c.coefficient, 0);
-      const cv = vQ.filter(v => v.vote_option === 'CONTRA').reduce((a, c) => a + c.coefficient, 0);
-      datosVotaciones.push({ "Pregunta": q.title, "Estado": q.status, "A Favor (%)": fv.toFixed(2), "En Contra (%)": cv.toFixed(2) });
-    });
-    const l = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosAsistencia), "Padrón");
-    XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosVotaciones), "Votaciones");
-    XLSX.writeFile(l, `Acta_Asamblea_${new Date().toISOString().split('T')[0]}.xlsx`);
+    try {
+      // 1. Datos Asistencia - NUEVO: Se incluye la columna Documento
+      const datosAsistencia = propiedades.map(p => ({
+        "Inmueble": p.tower ? `Torre ${p.tower} - Apto ${p.number}` : `Apto ${p.number}`,
+        "Coeficiente (%)": p.coefficient,
+        "Asistencia": p.is_present ? "PRESENTE" : "AUSENTE",
+        "Tipo": p.is_proxy ? "Delegado / Poder" : (p.is_present ? "Titular" : ""),
+        "Nombre Asistente": p.is_proxy ? p.proxy_name : p.owner_name,
+        "Documento": p.is_proxy ? (p.proxy_document || "No registrado") : "N/A",
+        "PIN Acceso": p.is_present ? p.access_pin : ""
+      }));
+      datosAsistencia.push({ "Inmueble": "TOTAL QUÓRUM", "Coeficiente (%)": quorumActual, "Asistencia": "", "Tipo": "", "Nombre Asistente": "", "Documento": "", "PIN Acceso": "" });
+      
+      const questionIds = preguntas.map(q => q.id);
+      
+      const { data: allVotes, error: votesError } = await supabase
+        .from("assembly_votes")
+        .select("question_id, vote_option, coefficient")
+        .in("question_id", questionIds.length > 0 ? questionIds : ['dummy-id']);
+
+      if (votesError) throw votesError;
+
+      const datosVotaciones: any[] = [];
+      preguntas.forEach(q => {
+        const vQ = allVotes?.filter(v => v.question_id === q.id) || [];
+        const fv = vQ.filter(v => v.vote_option === 'FAVOR').reduce((a, c) => a + c.coefficient, 0);
+        const cv = vQ.filter(v => v.vote_option === 'CONTRA').reduce((a, c) => a + c.coefficient, 0);
+        const bv = vQ.filter(v => v.vote_option === 'BLANCO').reduce((a, c) => a + c.coefficient, 0);
+        datosVotaciones.push({ 
+          "Pregunta": q.title, 
+          "Estado": q.status, 
+          "A Favor (%)": fv.toFixed(2), 
+          "En Contra (%)": cv.toFixed(2),
+          "En Blanco (%)": bv.toFixed(2),
+          "Total Participación (%)": (fv + cv + bv).toFixed(2)
+        });
+      });
+      
+      const l = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosAsistencia), "Padrón");
+      XLSX.utils.book_append_sheet(l, XLSX.utils.json_to_sheet(datosVotaciones), "Votaciones");
+      XLSX.writeFile(l, `Acta_Asamblea_${asamblea?.name ? asamblea.name.replace(/\s+/g, '_') : new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert("Hubo un error al generar el archivo Excel. Verifica la conexión.");
+    }
   };
 
   if (cargando) return <div className="p-8 animate-pulse text-blue-600">Cargando Sala...</div>;
@@ -240,9 +280,18 @@ export default function SalaControlPage() {
     <div className="p-8 relative">
       <div className="max-w-6xl mx-auto space-y-6">
         
+        {error && (
+          <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded shadow-sm text-red-700 font-medium">
+            {error}
+          </div>
+        )}
+
         {/* CABECERA */}
         <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100 flex justify-between items-center">
-          <div><h1 className="text-2xl font-bold text-blue-950">Sala de Control</h1></div>
+          <div>
+            <h1 className="text-2xl font-bold text-blue-950">Sala de Control</h1>
+            {asamblea?.name && <p className="text-sm font-semibold text-gray-500 uppercase mt-1">{asamblea.name}</p>}
+          </div>
           <div className="flex gap-4 items-center">
             <button onClick={exportarAExcel} className="bg-green-600 hover:bg-green-700 text-white text-sm font-bold py-2 px-4 rounded-lg">Descargar Acta</button>
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center min-w-37.5">
@@ -277,7 +326,12 @@ export default function SalaControlPage() {
                     <td className="px-6 py-4 font-bold text-blue-950">{p.tower ? `T${p.tower}-` : ""}Apto {p.number}</td>
                     <td className="px-6 py-4">
                       <div className="font-medium text-gray-800">{p.owner_name}</div>
-                      {p.is_proxy && <div className="text-xs font-semibold text-purple-700 bg-purple-100 px-2 py-0.5 rounded-md mt-1 inline-block">Delegado: {p.proxy_name}</div>}
+                      {p.is_proxy && (
+                        <div className="text-xs font-semibold text-purple-700 bg-purple-100 px-2 py-0.5 rounded-md mt-1 inline-block">
+                          {/* NUEVO: Muestra el documento en la tabla para confirmar que se guardó */}
+                          Delegado: {p.proxy_name} {p.proxy_document ? `(CC: ${p.proxy_document})` : ''}
+                        </div>
+                      )}
                       {p.is_present && p.access_pin && <span className="block mt-1 text-xs font-bold text-blue-800 bg-blue-100 px-2 py-1 rounded-md w-max">PIN: {p.access_pin}</span>}
                     </td>
                     <td className="px-6 py-4 font-semibold text-center text-blue-700">{p.coefficient}%</td>
@@ -325,11 +379,10 @@ export default function SalaControlPage() {
           </div>
         )}
 
-        {/* NUEVA PESTAÑA 3: DEBATE E INTERACCIÓN */}
+        {/* PESTAÑA 3: DEBATE E INTERACCIÓN */}
         {activeTab === 'DEBATE' && (
           <div className="space-y-6 flex flex-col md:flex-row gap-6">
             
-            {/* Panel de Configuración de Transmisión */}
             <div className="md:w-1/3 space-y-6">
               <div className="bg-white rounded-xl shadow-sm p-6 border border-blue-100">
                 <h3 className="font-bold text-blue-950 mb-2 flex items-center gap-2">
@@ -363,7 +416,6 @@ export default function SalaControlPage() {
               </div>
             </div>
 
-            {/* Panel de Gestión de Turnos */}
             <div className="md:w-2/3 bg-white rounded-xl shadow-sm p-6 border border-blue-100">
               <h3 className="font-bold text-blue-950 mb-4 flex items-center gap-2">
                 <span>✋</span> Cola de Peticiones de Palabra
@@ -412,7 +464,7 @@ export default function SalaControlPage() {
         )}
       </div>
 
-      {/* MODAL DE VOTACION EN VIVO (Mantenido intacto) */}
+      {/* MODAL DE VOTACION EN VIVO */}
       {preguntaActiva && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
@@ -444,6 +496,47 @@ export default function SalaControlPage() {
                 })}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL PARA REGISTRAR DELEGADO (Poder) */}
+      {modalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h3 className="text-xl font-bold text-blue-950 mb-4">Registrar Delegado (Poder)</h3>
+            <form onSubmit={registrarDelegado} className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Nombre Completo del Delegado</label>
+                <input
+                  required
+                  type="text"
+                  value={formDelegado.nombre}
+                  onChange={(e) => setFormDelegado({ ...formDelegado, nombre: e.target.value })}
+                  className="w-full p-3 border rounded-lg focus:ring-purple-600 outline-none"
+                  placeholder="Ej. Juan Pérez"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Cédula / Documento</label>
+                <input
+                  required
+                  type="text"
+                  value={formDelegado.documento}
+                  onChange={(e) => setFormDelegado({ ...formDelegado, documento: e.target.value })}
+                  className="w-full p-3 border rounded-lg focus:ring-purple-600 outline-none"
+                  placeholder="Ej. 10203040"
+                />
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button type="button" onClick={() => { setModalOpen(false); setFormDelegado({nombre:"", documento:""}); }} className="px-4 py-2 text-gray-500 font-bold hover:bg-gray-100 rounded-lg transition-colors">
+                  Cancelar
+                </button>
+                <button type="submit" className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg transition-colors">
+                  Guardar Delegado
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
