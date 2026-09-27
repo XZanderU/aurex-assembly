@@ -32,7 +32,7 @@ export default function PlanesPage() {
 
     // 4. Si se guardó con éxito en Supabase, hacemos el salto al micro-frontend
     // llevando exactamente el mismo código que acabamos de guardar.
-    window.location.href = `https://aurex-billing.vercel.app/checkout${referenceCode}`;
+    window.location.href = `https://aurex-billing.vercel.app/checkout/${referenceCode}`;
   };
 
   const planes = [
