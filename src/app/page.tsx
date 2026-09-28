@@ -230,7 +230,7 @@ export default function PlanesPage() {
 
           <div className="hidden items-center gap-3 sm:flex">
             <Link
-              href="/"
+              href="/login"
               className="rounded-lg px-4 py-2 text-sm font-bold text-gray-700 transition hover:bg-gray-100"
             >
               Ingresar
