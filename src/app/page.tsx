@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { supabase } from "../../lib/supabase";
+import { LogoAurex } from "./components/LogoAurex";
 
 interface Plan {
   id: string;
@@ -214,6 +215,7 @@ export default function PlanesPage() {
               </svg>
             </div>
             <div>
+              <LogoAurex className="w-10 h-10"/>
               <div className="text-base font-black tracking-tight text-blue-950">Aurex Assembly</div>
               <div className="hidden text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-400 sm:block">
                 Gestión de asambleas
@@ -690,6 +692,7 @@ export default function PlanesPage() {
       <footer className="border-t border-blue-900 bg-blue-950">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-7 text-sm text-blue-100 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
+            <LogoAurex className="w-10 h-10"/>
             <div className="font-black text-white">Aurex Assembly</div>
             <div className="mt-1 text-xs text-blue-200">Aurexcode · Gestión de asambleas para propiedad horizontal</div>
           </div>
