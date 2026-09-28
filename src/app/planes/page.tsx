@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { supabase } from "../../../lib/supabase"; 
+import { supabase } from "../../../lib/supabase";
+import Link from "next/link";
 
 export default function PlanesPage() {
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
@@ -88,6 +89,26 @@ export default function PlanesPage() {
               <h3 className="text-xl font-bold text-gray-800 mb-2">{plan.nombre}</h3>
               <p className="text-sm text-gray-500 mb-6 h-10">{plan.descripcion}</p>
               <div className="text-3xl font-black text-blue-700 mb-6">{plan.precioVisual}</div>
+
+              {/* Aquí termina tu <div className="grid..."> existente */}
+        
+        {/* NUEVA SECCIÓN: Prueba Gratuita */}
+        <div className="mt-16 bg-blue-50 border border-blue-100 rounded-2xl p-8 max-w-4xl mx-auto text-center">
+          <h2 className="text-2xl font-bold text-blue-900 mb-3">
+            ¿Quieres probar Aurex antes de decidir?
+          </h2>
+          <p className="text-gray-600 mb-6 max-w-2xl mx-auto">
+            Crea tu cuenta hoy y obtén <strong>14 días de acceso total</strong> a la plataforma. 
+            Configura tu primera asamblea, invita a los propietarios y realiza votaciones de prueba 
+            sin compromisos ni tarjetas de crédito.
+          </p>
+          <Link 
+            href="/register" 
+            className="inline-block bg-white border-2 border-blue-600 text-blue-700 hover:bg-blue-600 hover:text-white font-bold py-3 px-8 rounded-lg transition-colors"
+          >
+            Comenzar prueba gratis de 14 días
+          </Link>
+        </div>
               
               <ul className="text-left mb-8 space-y-3 grow">
                 {plan.caracteristicas.map((caracteristica, i) => (
